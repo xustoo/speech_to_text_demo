@@ -1,7 +1,8 @@
 [versions]
 activityComposeVersion = "1.8.2"
 agp = "8.5.1"
-composeBomVersion = "2024.02.01"
+alphacepheiVoskAndroid = "0.3.47"
+composeBomVersion = "2025.03.00"
 jnaPlatform = "5.13.0"
 jnaVersion = "5.13.0"
 kotlin = "1.9.0"
@@ -14,7 +15,9 @@ activityCompose = "1.8.0"
 composeBom = "2024.04.01"
 lifecycleRuntimeKtxVersion = "2.7.0"
 voskAndroid = "0.3.45"
-voskAndroidVersion = "0.3.32"
+voskAndroidService = "0.3.45"
+voskAndroidVersion = "0.3.45"
+voskVoskAndroid = "0.3.45"
 
 [libraries]
 androidx-activity-compose-v182 = { module = "androidx.activity:activity-compose", version.ref = "activityComposeVersion" }
@@ -42,7 +45,10 @@ ui = { module = "androidx.compose.ui:ui" }
 ui-graphics = { module = "androidx.compose.ui:ui-graphics" }
 ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 vosk-android = { module = "com.alphacephei:vosk-android", version.ref = "voskAndroid" }
+vosk-android-service = { module = "com.alphacephei:vosk-android-service", version.ref = "voskAndroidService" }
 vosk-android-v0332 = { module = "com.alphacephei:vosk-android", version.ref = "voskAndroidVersion" }
+vosk-android-v0347 = { module = "com.alphacephei:vosk-android", version.ref = "alphacepheiVoskAndroid" }
+vosk-vosk-android = { module = "org.vosk:vosk-android", version.ref = "voskVoskAndroid" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

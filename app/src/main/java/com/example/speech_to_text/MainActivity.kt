@@ -1,42 +1,29 @@
 package com.example.speech_to_text
 
-
-import android.os.Bundle
-import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
-import androidx.lifecycle.viewmodel.compose.viewModel
-
-import com.example.speech_to_text.ui.theme.Speech_to_TextTheme
-
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.speech.RecognitionListener
+import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
 import android.widget.Toast
-import androidx.compose.ui.platform.LocalContext // LocalContext için
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.viewmodel.compose.viewModel
 import org.vosk.LibVosk
 import org.vosk.LogLevel
 import org.vosk.Model
@@ -45,59 +32,72 @@ import org.vosk.android.SpeechService
 import org.vosk.android.StorageService
 import java.io.IOException
 import java.util.Locale
+import android.speech.RecognitionListener as GoogleRecognitionListener // Çakışmayı önlemek için
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 
 
-class MainActivity : ComponentActivity() { //AppCompatActivity yerine ComponentActivity
+class MainActivity : ComponentActivity() {
 
-    private val REQUEST_RECORD_AUDIO_PERMISSION = 200
-    var speechService: SpeechService? = null
-    var model: Model? = null
-    var speechRecognizer: SpeechRecognizer? = null //Google için
+    private var speechService: SpeechService? = null
+    private var model: Model? = null
+    private var speechRecognizer: SpeechRecognizer? = null // Google için
+
+    private val viewModel: MainViewModel by viewModels() // Dikkat: by viewModels()
+
+
+    // İzin İsteği için ActivityResultLauncher
+    private val requestPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+            if (isGranted) {
+                initModel() // İzin verildiyse modeli yükle
+            } else {
+                Toast.makeText(this, "Mikrofon izni gerekiyor!", Toast.LENGTH_SHORT).show()
+            }
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Vosk için gerekli başlangıç ayarları
         LibVosk.setLogLevel(LogLevel.INFO)
+        checkRecordAudioPermission() //İzin isteme
 
-        // İzin kontrolü ve model yükleme (izin verilmişse)
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST_RECORD_AUDIO_PERMISSION)
-        } else {
-            initModel {
-                setContent {
-                    SpeechToTextApp() // Ana Composable fonksiyonumuz
-                }
-            }
-        }
         setContent {
-            SpeechToTextApp() // İzin olmasa bile içeriği göster.
+            val viewModel: MainViewModel = viewModel() // ViewModel'i burada oluştur
+            SpeechToTextApp(viewModel)
+        }
+    }
+
+    private fun checkRecordAudioPermission() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            // İzin istenmediyse veya reddedildiyse, izin iste
+            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            // İzin zaten verildiyse, modeli yükle
+            initModel()
         }
     }
 
 
-    private fun initModel(onModelReady: () -> Unit) {
-        StorageService.unpack(this, "vosk-model-small-tr-0.3", "model",
+    private fun initModel() {
+        StorageService.unpack(this, "vosk-model-small-en-0.15", "model", //Model ismi
             { loadedModel ->
                 model = loadedModel
-                onModelReady() //Model hazır olduğunda bildirimde bulun.
+                initVoskRecognizer()
             },
             { exception ->
                 Toast.makeText(this, "Model yüklenirken hata: ${exception.message}", Toast.LENGTH_LONG).show()
                 Log.e("Vosk", "Model yükleme hatası", exception)
-            })
+            }
+        )
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == REQUEST_RECORD_AUDIO_PERMISSION && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            initModel {
-                setContent {
-                    SpeechToTextApp()
-                }
-            }
-        } else {
-            Toast.makeText(this, "Mikrofon izni gerekiyor!", Toast.LENGTH_SHORT).show()
+    private fun initVoskRecognizer() {
+        try {
+            val rec = Recognizer(model, 16000.0f)
+            speechService = SpeechService(rec, 16000.0f)
+        } catch (e: IOException) {
+            Toast.makeText(this, "Vosk başlatılamadı: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -105,16 +105,15 @@ class MainActivity : ComponentActivity() { //AppCompatActivity yerine ComponentA
         super.onDestroy()
         speechService?.stop()
         speechService?.shutdown()
-        speechRecognizer?.destroy() //Google için
+        speechRecognizer?.destroy()
         model?.close()
     }
 
-    //Inner class olarak ViewModel'i tanımla
     class MainViewModel : androidx.lifecycle.ViewModel() {
-        private val _recognizedText = mutableStateOf("") //MutableLiveData yerine mutableStateOf
-        val recognizedText: State<String> = _recognizedText //State olarak dışarıya aç
+        private val _recognizedText = mutableStateOf("")
+        val recognizedText: State<String> = _recognizedText
 
-        private val _isVoskSelected = mutableStateOf(true)
+        private val _isVoskSelected = mutableStateOf(true) // True: Vosk, False: Google
         val isVoskSelected: State<Boolean> = _isVoskSelected
 
         fun setRecognizedText(text: String) {
@@ -129,197 +128,259 @@ class MainActivity : ComponentActivity() { //AppCompatActivity yerine ComponentA
             _recognizedText.value = ""
         }
     }
-}
 
+    @Composable
+    fun SpeechToTextApp(viewModel: MainViewModel) {
+        val recognizedText by viewModel.recognizedText
+        val isVoskSelected by viewModel.isVoskSelected
+        val activity = LocalContext.current as MainActivity
 
-@Composable
-fun SpeechToTextApp(viewModel: MainActivity.MainViewModel = viewModel()) { //ViewModel'i parametre olarak al
-    val recognizedText by viewModel.recognizedText
-    val isVoskSelected by viewModel.isVoskSelected
-    val activity = LocalContext.current as MainActivity //Context'e erişim
-
-
-    MaterialTheme {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Text(
-                text = recognizedText,
+        MaterialTheme {
+            Column(
                 modifier = Modifier
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState())
-                    .padding(bottom = 16.dp)
-            )
-            Button(
-                onClick = {
-                    if (isVoskSelected) {
-                        activity.startVoskListening(viewModel::setRecognizedText) //Fonksiyon referansı
-                    } else {
-                        activity.startGoogleListening(viewModel::setRecognizedText)
-                    }
-                },
-                modifier = Modifier.padding(bottom = 8.dp)
+                    .fillMaxSize()
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
-                Text("Konuşmayı Başlat")
-            }
+                Text(
+                    text = recognizedText,
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState())
+                        .padding(bottom = 16.dp)
+                )
 
-            Button(onClick = { viewModel.toggleVoskSelection() }) {
-                Text(if (isVoskSelected) "Vosk Kullanılıyor" else "Google Kullanılıyor")
-            }
-            Button(onClick = { viewModel.clearText() })
-            {
-                Text("Temizle")
+                Button(
+                    onClick = {
+                        if (isVoskSelected) {
+                            activity.startVoskListening(viewModel::setRecognizedText)
+                        } else {
+                            activity.startGoogleListening(viewModel::setRecognizedText)
+                        }
+                    },
+                    modifier = Modifier.padding(bottom = 8.dp)
+                ) {
+                    Text("Konuşmayı Başlat")
+                }
+
+                Button(onClick = { viewModel.toggleVoskSelection() }) {
+                    Text(if (isVoskSelected) "Vosk Kullanılıyor" else "Google Kullanılıyor")
+                }
+                Button(onClick = { viewModel.clearText() }) {
+                    Text("Temizle")
+                }
             }
         }
     }
-}
 
-fun MainActivity.startVoskListening(onResult: (String) -> Unit) { //Fonksiyon parametre olarak
-    if (model != null) {
+
+    private fun startVoskListening(onResult: (String) -> Unit) {
+        if (model == null) {
+            Toast.makeText(this, "Vosk modeli yüklenemedi", Toast.LENGTH_SHORT).show()
+            return
+        }
+
         try {
-            speechService?.stop() //Önce durdur
-            speechService = null //Sıfırla
+            speechService?.stop() // Önce durdur
+            speechService = null // Sıfırla, yeni bir tane oluştur.
             val rec = Recognizer(model, 16000.0f)
             speechService = SpeechService(rec, 16000.0f)
-            speechService!!.startListening(object : org.vosk.android.RecognitionListener {
-                override fun onPartialResult(result: String) {
-                    processVoskResult(result, isFinal = false, onResult)
+            speechService?.startListening(object :
+                org.vosk.android.RecognitionListener { // Doğru import ve kullanım
+                override fun onPartialResult(partialResult: String) {
+                    processVoskResult(partialResult, isFinal = false, onResult)
                 }
 
                 override fun onResult(result: String) {
                     processVoskResult(result, isFinal = true, onResult)
+                    stopListening()  // Vosk'u durdur
+                    startListening() // ve tekrar başlat (sürekli dinleme için)
                 }
 
-                override fun onFinalResult(result: String) {}
-                override fun onError(exception: Exception) {
-                    Toast.makeText(this@startVoskListening,"Vosk Hatası: ${exception.message}",Toast.LENGTH_LONG).show()
+                override fun onFinalResult(hypothesis: String?) {
+                    TODO("Not yet implemented")
                 }
+
+                override fun onError(error: Exception) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Vosk Hatası: ${error.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+
                 override fun onTimeout() {
-                    Toast.makeText(this@startVoskListening, "Vosk Zaman Aşımı", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Vosk Zaman Aşımı", Toast.LENGTH_SHORT)
+                        .show()
                 }
             })
         } catch (e: IOException) {
-            Toast.makeText(this@startVoskListening,"Vosk başlatılamadı ${e.message}",Toast.LENGTH_LONG).show()
+            Toast.makeText(
+                this,
+                "Vosk başlatılırken hata oluştu: ${e.message}",
+                Toast.LENGTH_SHORT
+            ).show()
         }
     }
-    else{
-        Toast.makeText(this, "Vosk modeli yüklenemedi", Toast.LENGTH_SHORT).show()
-    }
-}
-
-fun MainActivity.processVoskResult(jsonResult: String, isFinal: Boolean, onResult: (String) -> Unit) {
-    val result = try {
-        if (isFinal) {
-            org.json.JSONObject(jsonResult).getString("text")
-        } else {
-            org.json.JSONObject(jsonResult).getString("partial")
-        }
-    } catch (e: Exception) {
-        ""
-    }
-
-    if (result.isNotBlank()) {
-        if (isFinal) {
-            onResult(result) //Callback fonksiyonunu çağır
-        } else {
-            onResult(result) //Callback
-        }
-    }
-}
-
-
-fun MainActivity.startGoogleListening(onResult: (String) -> Unit) { //Fonksiyon parametre
-    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-
-        if(speechRecognizer == null) //Eğer daha önce oluşturulmadıysa oluştur
-        {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-            setupGoogleSpeechRecognizer(onResult) //onResult'u buraya da aktar.
-        }
-
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Bir şeyler söyleyin...")
-        intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-        speechRecognizer?.startListening(intent) //Google
-    } else {
-        Toast.makeText(this, "Mikrofon izni verilmedi.", Toast.LENGTH_SHORT).show()
-    }
-}
-
-//Yeni fonksiyon: Google için RecognitionListener'ı kur. onResult parametresi
-fun MainActivity.setupGoogleSpeechRecognizer(onResult: (String) -> Unit)
-{
-    speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) {
-            Toast.makeText(this@setupGoogleSpeechRecognizer, "Dinlemeye hazır!", Toast.LENGTH_SHORT).show()
-        }
-
-        override fun onBeginningOfSpeech() {
-            onResult("Dinleniyor...") //Callback ile bildir.
-        }
-
-        override fun onRmsChanged(rmsdB: Float) {}
-        override fun onBufferReceived(buffer: ByteArray?) {}
-
-        override fun onEndOfSpeech() {
-            onResult("Dinleniyor...\nDinleme Bitti")
-        }
-
-        override fun onError(error: Int) {
-            val errorMessage = getErrorText(error)
-            Toast.makeText(this@setupGoogleSpeechRecognizer, "Hata: $errorMessage", Toast.LENGTH_LONG).show()
-            Log.e("SpeechRecognizer", "Error: $errorMessage")
-        }
-
-        override fun onResults(results: Bundle?) {
-            val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            if (!matches.isNullOrEmpty()) {
-                val text = matches[0]
-                onResult(text) //Callback ile bildir.
+    private fun processVoskResult(jsonResult: String, isFinal: Boolean, onResult: (String) -> Unit) {
+        val result = try {
+            if(isFinal) {
+                org.json.JSONObject(jsonResult).getString("text")
             }
-        }
-        override fun onPartialResults(partialResults: Bundle?) {
-            val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            if (!matches.isNullOrEmpty()) {
-                val text = matches[0]
-                onResult(text) //Callback ile bildir
+            else{
+                org.json.JSONObject(jsonResult).getString("partial")
             }
+        } catch (e: Exception) {
+            ""
         }
-        override fun onEvent(eventType: Int, params: Bundle?) {}
-    })
+        if(result.isNotBlank()){
+            onResult(result)
+        }
 
-}
-
-//Yardımcı fonksiyon: Hata mesajlarını çevir
-private fun MainActivity.getErrorText(errorCode: Int): String {
-    return when (errorCode) {
-        SpeechRecognizer.ERROR_AUDIO -> "ASes kaydı hatası"
-        SpeechRecognizer.ERROR_CLIENT -> "Aİstemci tarafı hatası"
-        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "AYetersiz izinler"
-        SpeechRecognizer.ERROR_NETWORK -> "AAğ hatası"
-        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "AAğ zaman aşımı"
-        SpeechRecognizer.ERROR_NO_MATCH -> "AEşleşme bulunamadı"
-        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "ATanıyıcı meşgul"
-        SpeechRecognizer.ERROR_SERVER -> "ASunucu hatası"
-        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "AKonuşma zaman aşımı"
-        else -> "Bilinmeyen hata"
     }
-}
 
-@Preview
-@Composable
-fun PreviewSpeechToTextApp(){
-    SpeechToTextApp() //viewModel parametresi almadan çağır.
-}
 
-@Preview(showBackground = true)
-@Composable
-fun DefaultPreview() {
-    SpeechToTextApp()
+    private fun startGoogleListening(onResult: (String) -> Unit) {
+        if (ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            if (speechRecognizer == null) {
+                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+                setupGoogleSpeechRecognizer(onResult)
+            }
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            intent.putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Bir şeyler söyleyin...")
+            intent.putExtra(
+                RecognizerIntent.EXTRA_PARTIAL_RESULTS,
+                true
+            ) //Kısmi sonuçları almak için
+
+            speechRecognizer?.startListening(intent)
+        } else {
+            Toast.makeText(this, "Mikrofon izni verilmedi", Toast.LENGTH_SHORT).show()
+        }
+
+    }
+
+
+    private fun setupGoogleSpeechRecognizer(onResult: (String) -> Unit) {
+        speechRecognizer?.setRecognitionListener(object :
+            GoogleRecognitionListener {  // Burada çakışmayı çöz
+            override fun onReadyForSpeech(params: Bundle?) {
+                Toast.makeText(
+                    this@MainActivity,
+                    "Dinlemeye hazır!",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+
+            override fun onBeginningOfSpeech() {
+                onResult("Dinleniyor...")
+            }
+
+            override fun onRmsChanged(rmsdB: Float) {}
+
+            override fun onBufferReceived(buffer: ByteArray) {}
+
+            override fun onEndOfSpeech() {
+                onResult("Dinleniyor... (Bitti)") // veya boş bırakabilirsiniz
+            }
+
+            override fun onError(error: Int) {
+                val errorMessage = getErrorText(error)
+                Toast.makeText(
+                    this@MainActivity,
+                    "Hata: $errorMessage",
+                    Toast.LENGTH_LONG
+                ).show()
+                Log.e("SpeechRecognizer", "Error: $errorMessage")
+            }
+
+            override fun onResults(results: Bundle?) {
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (!matches.isNullOrEmpty()) {
+                    onResult(matches[0])
+                }
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {
+                val matches =
+                    partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (!matches.isNullOrEmpty()) {
+                    onResult(matches[0])
+                }
+            }
+
+            override fun onEvent(p0: Int, p1: Bundle?) {}
+        })
+    }
+
+
+    private fun getErrorText(errorCode: Int): String {
+        return when (errorCode) {
+            SpeechRecognizer.ERROR_AUDIO -> "Ses kaydı hatası"
+            SpeechRecognizer.ERROR_CLIENT -> "İstemci tarafı hatası"
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Yetersiz izinler"
+            SpeechRecognizer.ERROR_NETWORK -> "Ağ hatası"
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Ağ zaman aşımı"
+            SpeechRecognizer.ERROR_NO_MATCH -> "Eşleşme bulunamadı"
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Tanıyıcı meşgul"
+            SpeechRecognizer.ERROR_SERVER -> "Sunucu hatası"
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Konuşma zaman aşımı"
+            else -> "Bilinmeyen hata"
+        }
+    }
+
+    private fun stopListening(){ //Vosk için durdurma metodu
+        speechService?.stop()
+    }
+    private fun startListening(){ //Vosk için başlatma metodu.
+        speechService?.startListening(object : org.vosk.android.RecognitionListener { // Doğru import ve kullanım
+            override fun onPartialResult(partialResult: String) {
+                processVoskResult(partialResult, isFinal = false, ::updateText)
+            }
+
+            override fun onResult(result: String) {
+                processVoskResult(result, isFinal = true, ::updateText)
+                stopListening()  // Vosk'u durdur
+                startListening() // ve tekrar başlat (sürekli dinleme için)
+            }
+
+            override fun onFinalResult(hypothesis: String?) {
+                TODO("Not yet implemented")
+            }
+
+            override fun onError(error: Exception) {
+                Toast.makeText(this@MainActivity, "Vosk Hatası: ${error.message}", Toast.LENGTH_LONG)
+                    .show()
+            }
+
+            override fun onTimeout() {
+                Toast.makeText(this@MainActivity, "Vosk Zaman Aşımı", Toast.LENGTH_SHORT).show()
+            }
+        })
+    }
+    private  fun updateText(text: String){ //Yardımcı bir method
+        runOnUiThread{
+            //val viewModel: MainViewModel = viewModel()
+            viewModel.setRecognizedText(text)
+        }
+    }
+
+
+    @Preview(showBackground = true)
+    @Composable
+    fun DefaultPreview() {
+        MaterialTheme { // Use default MaterialTheme
+            SpeechToTextApp(viewModel = MainViewModel())
+        }
+    }
 }

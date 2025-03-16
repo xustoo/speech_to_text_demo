@@ -48,12 +48,7 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
 
-            pickFirsts += listOf( // pickFirst yerine pickFirsts ve liste
-                "lib/x86/libvosk.so",
-                "lib/x86_64/libvosk.so",
-                "lib/armeabi-v7a/libvosk.so",
-                "lib/arm64-v8a/libvosk.so"
-            )
+
 
 
 
@@ -65,12 +60,16 @@ android {
 }
 
 dependencies {
-    // En son sürümü kullanır (+)
-    implementation(libs.vosk.android.v0332)
-    
+    implementation ("androidx.appcompat:appcompat:1.3.1")
+
+    //implementation (libs.net.jna)
+    implementation (libs.vosk.android.v0347)
 
 
-    implementation(platform(libs.androidx.compose.bom.v20240201)) // BOM'u ekle. Güncel sürüm!
+
+
+
+    //implementation(platform(libs.androidx.compose.bom.v20240201)) // BOM'u ekle. Güncel sürüm!
 
 
     implementation(libs.ui)
@@ -101,9 +100,5 @@ dependencies {
 
 }
 
-configurations.all {
-    resolutionStrategy {
-        force("net.java.dev.jna:jna:4.4.0")
-    }
-}
+
 
