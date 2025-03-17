@@ -35,7 +35,11 @@ import java.util.Locale
 import android.speech.RecognitionListener as GoogleRecognitionListener // Çakışmayı önlemek için
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileNotFoundException
+import java.io.FileOutputStream
+import java.util.zip.ZipInputStream
 
 class MainActivity : ComponentActivity() {
 
@@ -80,18 +84,103 @@ class MainActivity : ComponentActivity() {
 
 
     private fun initModel() {
-        StorageService.unpack(this, "vosk-model-small-en-0.15", "model", //Model ismi
-            { loadedModel ->
-                model = loadedModel
-                initVoskRecognizer()
-            },
-            { exception ->
-                Toast.makeText(this, "Model yüklenirken hata: ${exception.message}", Toast.LENGTH_LONG).show()
-                Log.e("Vosk", "Model yükleme hatası", exception)
-            }
-        )
-    }
+        val assets = assets
+        val modelsDir = File(filesDir, "models")
+        if (!modelsDir.exists()) {
+            modelsDir.mkdirs()
+            Log.d("Vosk", "models dizini oluşturuldu")
+        }
 
+        val modelName = if (viewModel.isTurkishSelected.value) {
+            "vosk-model-small-tr-0.3.zip"
+        } else {
+            "vosk-model-small-en-us-0.15.zip" // İngilizce modelinizin adı
+        }
+        val modelZipFile = File(modelsDir, modelName)
+        // Açılmış modelin DİZİNİ (bunu Model nesnesi için kullanacağız)
+        val extractedModelDir = File(modelsDir, modelName.replace(".zip", ""))
+
+        var modelLoaded = false // Yeni bir model yüklenip yüklenmediğini takip et
+
+
+        // extractedModelDir.exists() kontrolü, modelin ZATEN açılıp açılmadığını kontrol eder.
+        if (!extractedModelDir.exists()) {
+            Log.d("Vosk", "$modelName kopyalanıyor...")
+            try {
+                // 1. ZIP dosyasını assets'ten okuyup filesDir/models altına kopyala
+                assets.open(modelName).use { inputStream ->
+                    FileOutputStream(modelZipFile).use { outputStream ->
+                        inputStream.copyTo(outputStream)
+                    }
+                }
+                Log.d("Vosk", "$modelName başarıyla kopyalandı")
+
+                // 2. ZIP dosyasını AÇ (extract et)
+                Log.d("Vosk", "$modelName açılıyor...")
+                ZipInputStream(FileInputStream(modelZipFile)).use { zipInputStream ->
+                    var entry = zipInputStream.nextEntry
+                    while (entry != null) {
+                        // modelsDir KULLANIYORUZ, extractedModelDir DEĞİL!
+                        // ZIP içindeki yapıyı koruyarak dosyaları doğru yere çıkarır.
+                        val filePath = File(modelsDir, entry.name)
+
+                        if (entry.isDirectory) {
+                            // Dizin ise, dizini oluştur.
+                            filePath.mkdirs()
+                        } else {
+                            // Dosya ise, dosyayı oluştur ve içeriğini yaz.
+                            // *** BURASI ÇOK ÖNEMLİ! ***
+                            FileOutputStream(filePath).use { fileOutputStream ->
+                                zipInputStream.copyTo(fileOutputStream)
+                            }
+                        }
+                        zipInputStream.closeEntry()
+                        entry = zipInputStream.nextEntry
+                    }
+                }
+                Log.d("Vosk", "$modelName başarıyla açıldı")
+
+                // 3. Artık işi biten ZIP dosyasını sil
+                modelZipFile.delete()
+
+                modelLoaded = true // Yeni model yüklendi
+
+
+            } catch (e: FileNotFoundException) {
+                Log.e("Vosk", "$modelName bulunamadı...", e)
+                Toast.makeText(this, "Model dosyası bulunamadı!", Toast.LENGTH_LONG).show()
+                return // Hata varsa fonksiyondan çık
+            } catch (e: SecurityException) {
+                Log.e("Vosk", "Güvenlik hatası.", e)
+                Toast.makeText(this, "Güvenlik hatası.", Toast.LENGTH_LONG).show()
+                return // Hata varsa fonksiyondan çık
+            } catch (e: IOException) {
+                Log.e("Vosk", "Kopyalama/açma hatası", e)
+                Toast.makeText(this, "Model kopyalanamadı/açılamadı: ${e.message}", Toast.LENGTH_LONG).show()
+                return // Hata varsa fonksiyondan çık
+            }
+        } else {
+            Log.d("Vosk", "$modelName zaten kopyalanmış ve açılmış.")
+        }
+
+
+        // Model nesnesini OLUŞTUR (Artık doğru dizini kullanıyoruz)
+        try {
+            Log.d("Vosk", "extractedModelDir: ${extractedModelDir.absolutePath}")
+            if (modelLoaded || model == null) {
+                model = Model(extractedModelDir.absolutePath)
+                Log.d("Vosk", "Model yüklendi: ${extractedModelDir.absolutePath}")
+            }
+            if (modelLoaded || speechService == null) { //Model değiştiyse veya ilk defa yükleniyorsa initVoskRecognizer çalıştır.
+                initVoskRecognizer()
+            }
+
+        } catch (e: IOException) {
+            Log.e("Vosk", "Model yüklenemedi", e)
+            Toast.makeText(this, "Model yüklenemedi: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+
+    }
     private fun initVoskRecognizer() {
         try {
             val rec = Recognizer(model, 16000.0f)
@@ -116,13 +205,43 @@ class MainActivity : ComponentActivity() {
         private val _isVoskSelected = mutableStateOf(true) // True: Vosk, False: Google
         val isVoskSelected: State<Boolean> = _isVoskSelected
 
+        private val _isTurkishSelected = mutableStateOf(true)
+        val isTurkishSelected: State<Boolean> = _isTurkishSelected
+
+        private val _isTurkishActive = mutableStateOf(true)
+        val isTurkishActive: State<Boolean> = _isTurkishActive
+
+        private val _isEnglishActive = mutableStateOf(false)
+        val isEnglishActive: State<Boolean> = _isEnglishActive
+
         fun setRecognizedText(text: String) {
             _recognizedText.value = text
         }
 
         fun toggleVoskSelection() {
             _isVoskSelected.value = !_isVoskSelected.value
+            _isTurkishActive.value = _isVoskSelected.value  //Vosk seçiliyse aktif, değilse pasif.
+            _isEnglishActive.value = false
+            if(_isVoskSelected.value) _isTurkishSelected.value = true //Vosk seçildiğinde default olarak Türkçe seç.
         }
+
+
+        fun setTurkish() {
+            if (_isVoskSelected.value) { // Sadece Vosk seçiliyken
+                _isTurkishSelected.value = true
+                _isTurkishActive.value = true
+                _isEnglishActive.value = false
+            }
+        }
+
+        fun setEnglish() {
+            if (_isVoskSelected.value) { // Sadece Vosk seçiliyken
+                _isTurkishSelected.value = false
+                _isTurkishActive.value = false
+                _isEnglishActive.value = true
+            }
+        }
+
 
         fun clearText() {
             _recognizedText.value = ""
@@ -134,6 +253,10 @@ class MainActivity : ComponentActivity() {
         val recognizedText by viewModel.recognizedText
         val isVoskSelected by viewModel.isVoskSelected
         val activity = LocalContext.current as MainActivity
+
+        val isTurkishSelected by viewModel.isTurkishSelected
+        val isTurkishActive by viewModel.isTurkishActive  // Buton aktiflik durumları
+        val isEnglishActive by viewModel.isEnglishActive // Buton aktiflik durumları
 
         MaterialTheme {
             Column(
@@ -167,6 +290,28 @@ class MainActivity : ComponentActivity() {
                 Button(onClick = { viewModel.toggleVoskSelection() }) {
                     Text(if (isVoskSelected) "Vosk Kullanılıyor" else "Google Kullanılıyor")
                 }
+                Row(modifier = Modifier.padding(bottom = 8.dp)) {
+                    Button(
+                        onClick = {
+                            viewModel.setTurkish()
+                            activity.initModel() // Dili değiştirdikten sonra modeli yeniden yükle
+                        },
+                        enabled = isVoskSelected  // Buton, sadece Vosk seçiliyken aktif
+
+                    ) {
+                        Text("Türkçe", color = if (isTurkishActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Button(onClick = {
+                        viewModel.setEnglish()
+                        activity.initModel()  // Dili değiştirdikten sonra modeli yeniden yükle
+
+                    },
+                        enabled = isVoskSelected // Buton, sadece Vosk seçiliyken aktif
+
+                    ) {
+                        Text("English", color = if (isEnglishActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)                    }
+                }
                 Button(onClick = { viewModel.clearText() }) {
                     Text("Temizle")
                 }
@@ -199,8 +344,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 override fun onFinalResult(hypothesis: String?) {
-                    TODO("Not yet implemented")
-                }
+                    Log.d("Vosk", "onFinalResult: $hypothesis")                }
 
                 override fun onError(error: Exception) {
                     Toast.makeText(
@@ -355,7 +499,7 @@ class MainActivity : ComponentActivity() {
             }
 
             override fun onFinalResult(hypothesis: String?) {
-                TODO("Not yet implemented")
+                Log.d("Vosk", "onFinalResult: $hypothesis")
             }
 
             override fun onError(error: Exception) {
@@ -383,4 +527,4 @@ class MainActivity : ComponentActivity() {
             SpeechToTextApp(viewModel = MainViewModel())
         }
     }
-}
+    }
