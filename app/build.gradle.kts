@@ -64,6 +64,7 @@ dependencies {
 
     //implementation (libs.net.jna)
     implementation (libs.vosk.android.v0347)
+    implementation(libs.androidx.navigation.compose)
 
 
 

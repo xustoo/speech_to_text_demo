@@ -23,508 +23,698 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.viewmodel.compose.viewModel
+// import androidx.lifecycle.viewmodel.compose.viewModel // Bu import yerine by viewModels kullanılıyor
 import org.vosk.LibVosk
 import org.vosk.LogLevel
 import org.vosk.Model
 import org.vosk.Recognizer
 import org.vosk.android.SpeechService
-import org.vosk.android.StorageService
+// import org.vosk.android.StorageService // Kullanılmıyor
 import java.io.IOException
 import java.util.Locale
-import android.speech.RecognitionListener as GoogleRecognitionListener // Çakışmayı önlemek için
+import android.speech.RecognitionListener as GoogleRecognitionListener // Alias
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.lifecycle.ViewModel // Doğru ViewModel importu
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.util.zip.ZipInputStream
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.navigation.NavController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+
 
 class MainActivity : ComponentActivity() {
 
     private var speechService: SpeechService? = null
     private var model: Model? = null
-    private var speechRecognizer: SpeechRecognizer? = null // Google için
+    private var currentModelPath: String? = null // Takip etmek için hangi modelin yüklü olduğunu tutalım
+    private var voskRecognizer: Recognizer? = null // Recognizer'ı da üye değişken yapalım
+    private var googleSpeechRecognizer: SpeechRecognizer? = null // Google için
 
-    private val viewModel: MainViewModel by viewModels() // Dikkat: by viewModels()
 
+    // ViewModel'i Activity kapsamında oluştur
+    private val viewModel: MainViewModel by viewModels()
 
     // İzin İsteği için ActivityResultLauncher
     private val requestPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
             if (isGranted) {
-                initModel() // İzin verildiyse modeli yükle
+                // İzin verildiyse, başlangıçta seçili olan Vosk modelini yükle
+                if (viewModel.isVoskSelected.value) {
+                    initModel()
+                }
+                // Google seçiliyse özel bir başlatma gerekmez.
             } else {
                 Toast.makeText(this, "Mikrofon izni gerekiyor!", Toast.LENGTH_SHORT).show()
             }
         }
 
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         LibVosk.setLogLevel(LogLevel.INFO)
-        checkRecordAudioPermission() //İzin isteme
+        checkRecordAudioPermission() // İzin isteme/kontrol etme
 
         setContent {
-            val viewModel: MainViewModel = viewModel() // ViewModel'i burada oluştur
-            SpeechToTextApp(viewModel)
+            // Activity'nin viewModel'ini Composable'a ver
+            val navController = rememberNavController()
+            MaterialTheme { // Veya kendi tema adınız
+                NavHost(navController = navController, startDestination = "main") {
+                    // Ana Ekran Route'u
+                    composable("main") {
+                        SpeechToTextApp(
+                            viewModel = this@MainActivity.viewModel,
+                            navController = navController,
+                            activity = this@MainActivity // Activity referansını geçiyoruz
+                        )
+                    }
+                    // Geçmiş Ekranı Route'u
+                    composable("history") {
+                        HistoryScreen(
+                            navController = navController,
+                            viewModel = this@MainActivity.viewModel
+                        )
+                    }
+                }
+            }
+
         }
     }
 
     private fun checkRecordAudioPermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            // İzin istenmediyse veya reddedildiyse, izin iste
-            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        } else {
-            // İzin zaten verildiyse, modeli yükle
-            initModel()
+        when {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED -> {
+                // İzin zaten var. Başlangıçta Vosk seçili ise modelini yükle.
+                if (viewModel.isVoskSelected.value) {
+                    initModel()
+                }
+            }
+            else -> {
+                // İzin iste
+                requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
         }
     }
 
+    // --- Kaynak Temizleme Fonksiyonları ---
+    private fun releaseVoskResources() {
+        Log.d("VoskCleanup", "Releasing Vosk resources...")
+        speechService?.stop()
+        speechService?.shutdown()
+        voskRecognizer?.close() // Recognizer Model'den önce kapatılmalı
+        model?.close() // Model (native kaynaklar)
+        speechService = null
+        voskRecognizer = null
+        model = null
+        currentModelPath = null
+        Log.d("VoskCleanup", "Vosk resources released.")
+    }
+
+    private fun releaseGoogleRecognizer() {
+        Log.d("GoogleCleanup", "Releasing Google recognizer...")
+        googleSpeechRecognizer?.stopListening() // Önce dinlemeyi durdur
+        googleSpeechRecognizer?.cancel() // Bekleyen işlemleri iptal et
+        googleSpeechRecognizer?.destroy() // Kaynakları serbest bırak
+        googleSpeechRecognizer = null
+        Log.d("GoogleCleanup", "Google recognizer released.")
+    }
+
+    private fun releaseAllRecognizers() {
+        Log.d("Cleanup", "Releasing ALL recognizers...")
+        releaseVoskResources()
+        releaseGoogleRecognizer()
+        Log.d("Cleanup", "ALL recognizers released.")
+    }
+    // --- Bitiş: Kaynak Temizleme Fonksiyonları ---
 
     private fun initModel() {
-        val assets = assets
-        val modelsDir = File(filesDir, "models")
-        if (!modelsDir.exists()) {
-            modelsDir.mkdirs()
-            Log.d("Vosk", "models dizini oluşturuldu")
-        }
-
-        val modelName = if (viewModel.isTurkishSelected.value) {
-            "vosk-model-small-tr-0.3.zip"
+        // Hedeflenen model yolunu belirle
+        val targetModelDirName = if (viewModel.isTurkishSelected.value) {
+            "vosk-model-small-tr-0.3" // Türkçe model klasör adı
         } else {
-            "vosk-model-small-en-us-0.15.zip" // İngilizce modelinizin adı
+            "vosk-model-small-en-us-0.15" // İngilizce model klasör adı
         }
-        val modelZipFile = File(modelsDir, modelName)
-        // Açılmış modelin DİZİNİ (bunu Model nesnesi için kullanacağız)
-        val extractedModelDir = File(modelsDir, modelName.replace(".zip", ""))
+        val modelsBaseDir = File(filesDir, "models")
+        val targetExtractedModelDir = File(modelsBaseDir, targetModelDirName)
+        val targetModelPath = targetExtractedModelDir.absolutePath
 
-        var modelLoaded = false // Yeni bir model yüklenip yüklenmediğini takip et
+        Log.d("VoskInit", "Target model path: $targetModelPath")
+        Log.d("VoskInit", "Current model path: $currentModelPath")
 
+        // 1. Farklı bir model mi gerekiyor? Veya hiç model yüklü değil mi?
+        if (model == null || currentModelPath != targetModelPath) {
+            Log.d("VoskInit", "Model change detected or no model loaded. Releasing old resources.")
+            releaseVoskResources() // Önce mevcut Vosk kaynaklarını temizle
 
-        // extractedModelDir.exists() kontrolü, modelin ZATEN açılıp açılmadığını kontrol eder.
-        if (!extractedModelDir.exists()) {
-            Log.d("Vosk", "$modelName kopyalanıyor...")
-            try {
-                // 1. ZIP dosyasını assets'ten okuyup filesDir/models altına kopyala
-                assets.open(modelName).use { inputStream ->
-                    FileOutputStream(modelZipFile).use { outputStream ->
-                        inputStream.copyTo(outputStream)
-                    }
+            // 2. Gerekli model dosyaları var mı? Yoksa çıkar.
+            if (!targetExtractedModelDir.exists()) {
+                Log.d("VoskInit", "Model directory does not exist. Extracting...")
+                val modelZipName = "$targetModelDirName.zip"
+                val modelZipFile = File(modelsBaseDir, modelZipName)
+
+                // Gerekli dizini oluştur
+                if (!modelsBaseDir.exists()) {
+                    modelsBaseDir.mkdirs()
+                    Log.d("VoskInit", "Created models base directory: ${modelsBaseDir.absolutePath}")
                 }
-                Log.d("Vosk", "$modelName başarıyla kopyalandı")
 
-                // 2. ZIP dosyasını AÇ (extract et)
-                Log.d("Vosk", "$modelName açılıyor...")
-                ZipInputStream(FileInputStream(modelZipFile)).use { zipInputStream ->
-                    var entry = zipInputStream.nextEntry
-                    while (entry != null) {
-                        // modelsDir KULLANIYORUZ, extractedModelDir DEĞİL!
-                        // ZIP içindeki yapıyı koruyarak dosyaları doğru yere çıkarır.
-                        val filePath = File(modelsDir, entry.name)
-
-                        if (entry.isDirectory) {
-                            // Dizin ise, dizini oluştur.
-                            filePath.mkdirs()
-                        } else {
-                            // Dosya ise, dosyayı oluştur ve içeriğini yaz.
-                            // *** BURASI ÇOK ÖNEMLİ! ***
-                            FileOutputStream(filePath).use { fileOutputStream ->
-                                zipInputStream.copyTo(fileOutputStream)
-                            }
+                try {
+                    // ZIP'i assets'ten kopyala
+                    Log.d("VoskInit", "Copying $modelZipName from assets...")
+                    assets.open(modelZipName).use { inputStream ->
+                        FileOutputStream(modelZipFile).use { outputStream ->
+                            inputStream.copyTo(outputStream)
                         }
-                        zipInputStream.closeEntry()
-                        entry = zipInputStream.nextEntry
                     }
+                    Log.d("VoskInit", "$modelZipName copied successfully.")
+
+                    // ZIP'i aç
+                    Log.d("VoskInit", "Extracting $modelZipName...")
+                    ZipInputStream(FileInputStream(modelZipFile)).use { zipInputStream ->
+                        var entry = zipInputStream.nextEntry
+                        while (entry != null) {
+                            val filePath = File(modelsBaseDir, entry.name) // modelsBaseDir'e aç
+                            if (entry.isDirectory) {
+                                if (!filePath.exists()) filePath.mkdirs()
+                            } else {
+                                filePath.parentFile?.mkdirs() // Üst dizinleri oluştur
+                                FileOutputStream(filePath).use { fileOutputStream ->
+                                    zipInputStream.copyTo(fileOutputStream)
+                                }
+                            }
+                            zipInputStream.closeEntry()
+                            entry = zipInputStream.nextEntry
+                        }
+                    }
+                    Log.d("VoskInit", "$modelZipName extracted successfully to ${targetExtractedModelDir.absolutePath}")
+
+                    // ZIP dosyasını sil
+                    modelZipFile.delete()
+                    Log.d("VoskInit", "$modelZipName deleted.")
+
+                } catch (e: FileNotFoundException) {
+                    Log.e("VoskInit", "Model ZIP '$modelZipName' not found in assets!", e)
+                    Toast.makeText(this, "Model dosyası '$modelZipName' bulunamadı!", Toast.LENGTH_LONG).show()
+                    return
+                } catch (e: IOException) {
+                    Log.e("VoskInit", "Error copying/extracting model", e)
+                    Toast.makeText(this, "Model kopyalanamadı/açılamadı: ${e.message}", Toast.LENGTH_LONG).show()
+                    return
                 }
-                Log.d("Vosk", "$modelName başarıyla açıldı")
+            } else {
+                Log.d("VoskInit", "Model directory already exists: ${targetExtractedModelDir.absolutePath}")
+            }
 
-                // 3. Artık işi biten ZIP dosyasını sil
-                modelZipFile.delete()
+            // 3. Model nesnesini oluştur
+            try {
+                Log.d("VoskInit", "Loading Model from: $targetModelPath")
+                model = Model(targetModelPath)
+                currentModelPath = targetModelPath // Yüklenen modelin yolunu sakla
+                Log.d("VoskInit", "Model loaded successfully: $currentModelPath")
 
-                modelLoaded = true // Yeni model yüklendi
+                // 4. Recognizer ve SpeechService'i oluştur
+                Log.d("VoskInit", "Creating Recognizer and SpeechService...")
+                voskRecognizer = Recognizer(model, 16000.0f)
+                speechService = SpeechService(voskRecognizer, 16000.0f)
+                Log.d("VoskInit", "Recognizer and SpeechService created.")
 
-
-            } catch (e: FileNotFoundException) {
-                Log.e("Vosk", "$modelName bulunamadı...", e)
-                Toast.makeText(this, "Model dosyası bulunamadı!", Toast.LENGTH_LONG).show()
-                return // Hata varsa fonksiyondan çık
-            } catch (e: SecurityException) {
-                Log.e("Vosk", "Güvenlik hatası.", e)
-                Toast.makeText(this, "Güvenlik hatası.", Toast.LENGTH_LONG).show()
-                return // Hata varsa fonksiyondan çık
             } catch (e: IOException) {
-                Log.e("Vosk", "Kopyalama/açma hatası", e)
-                Toast.makeText(this, "Model kopyalanamadı/açılamadı: ${e.message}", Toast.LENGTH_LONG).show()
-                return // Hata varsa fonksiyondan çık
+                Log.e("VoskInit", "Failed to load Model or create Recognizer/SpeechService", e)
+                Toast.makeText(this, "Vosk modeli yüklenemedi: ${e.message}", Toast.LENGTH_LONG).show()
+                releaseVoskResources() // Hata olursa temizle
             }
         } else {
-            Log.d("Vosk", "$modelName zaten kopyalanmış ve açılmış.")
-        }
-
-
-        // Model nesnesini OLUŞTUR (Artık doğru dizini kullanıyoruz)
-        try {
-            Log.d("Vosk", "extractedModelDir: ${extractedModelDir.absolutePath}")
-            if (modelLoaded || model == null) {
-                model = Model(extractedModelDir.absolutePath)
-                Log.d("Vosk", "Model yüklendi: ${extractedModelDir.absolutePath}")
+            Log.d("VoskInit", "Required model ($targetModelPath) is already loaded.")
+            // Model zaten yüklü, Recognizer/Service null mı kontrol et (beklenmedik durum)
+            if (voskRecognizer == null || speechService == null) {
+                Log.w("VoskInit", "Model is loaded but Recognizer/Service is null. Recreating.")
+                try {
+                    voskRecognizer = Recognizer(model, 16000.0f)
+                    speechService = SpeechService(voskRecognizer, 16000.0f)
+                    Log.d("VoskInit", "Recognizer and SpeechService recreated.")
+                } catch (e: IOException) {
+                    Log.e("VoskInit", "Failed to recreate Recognizer/SpeechService", e)
+                    Toast.makeText(this, "Vosk yeniden başlatılamadı: ${e.message}", Toast.LENGTH_LONG).show()
+                    releaseVoskResources()
+                }
             }
-            if (modelLoaded || speechService == null) { //Model değiştiyse veya ilk defa yükleniyorsa initVoskRecognizer çalıştır.
-                initVoskRecognizer()
-            }
-
-        } catch (e: IOException) {
-            Log.e("Vosk", "Model yüklenemedi", e)
-            Toast.makeText(this, "Model yüklenemedi: ${e.message}", Toast.LENGTH_LONG).show()
-        }
-
-    }
-    private fun initVoskRecognizer() {
-        try {
-            val rec = Recognizer(model, 16000.0f)
-            speechService = SpeechService(rec, 16000.0f)
-        } catch (e: IOException) {
-            Toast.makeText(this, "Vosk başlatılamadı: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        speechService?.stop()
-        speechService?.shutdown()
-        speechRecognizer?.destroy()
-        model?.close()
+        Log.d("MainActivity", "onDestroy called. Releasing all resources.")
+        releaseAllRecognizers() // Uygulama kapanırken tüm kaynakları serbest bırak
     }
 
-    class MainViewModel : androidx.lifecycle.ViewModel() {
+    // --- ViewModel Tanımı (MainActivity içinde) ---
+    // Daha iyi pratik: Bu sınıfı ayrı bir Kotlin dosyasına taşımak.
+    class MainViewModel : ViewModel() {
         private val _recognizedText = mutableStateOf("")
         val recognizedText: State<String> = _recognizedText
 
-        private val _isVoskSelected = mutableStateOf(true) // True: Vosk, False: Google
+        private val _isVoskSelected = mutableStateOf(true)
         val isVoskSelected: State<Boolean> = _isVoskSelected
 
-        private val _isTurkishSelected = mutableStateOf(true)
+        private val _isTurkishSelected = mutableStateOf(true) // Vosk dili için
         val isTurkishSelected: State<Boolean> = _isTurkishSelected
 
-        private val _isTurkishActive = mutableStateOf(true)
-        val isTurkishActive: State<Boolean> = _isTurkishActive
-
-        private val _isEnglishActive = mutableStateOf(false)
-        val isEnglishActive: State<Boolean> = _isEnglishActive
+        private val _savedTexts = mutableListOf<String>()
+        val savedTexts = _savedTexts
 
         fun setRecognizedText(text: String) {
             _recognizedText.value = text
         }
 
         fun toggleVoskSelection() {
-            _isVoskSelected.value = !_isVoskSelected.value
-            _isTurkishActive.value = _isVoskSelected.value  //Vosk seçiliyse aktif, değilse pasif.
-            _isEnglishActive.value = false
-            if(_isVoskSelected.value) _isTurkishSelected.value = true //Vosk seçildiğinde default olarak Türkçe seç.
+            val newSelection = !_isVoskSelected.value
+            _isVoskSelected.value = newSelection
+            // State değişti, UI ve initModel/release çağrıları bunu yönetecek.
+            clearText() // Geçiş yapınca metni temizle
         }
 
-
         fun setTurkish() {
-            if (_isVoskSelected.value) { // Sadece Vosk seçiliyken
-                _isTurkishSelected.value = true
-                _isTurkishActive.value = true
-                _isEnglishActive.value = false
+            if (_isVoskSelected.value) { // Sadece Vosk seçiliyken anlamlı
+                if (!_isTurkishSelected.value) { // Zaten Türkçe değilse değiştir
+                    _isTurkishSelected.value = true
+                    clearText() // Dil değişince metni temizle
+                }
             }
         }
 
         fun setEnglish() {
-            if (_isVoskSelected.value) { // Sadece Vosk seçiliyken
-                _isTurkishSelected.value = false
-                _isTurkishActive.value = false
-                _isEnglishActive.value = true
+            if (_isVoskSelected.value) { // Sadece Vosk seçiliyken anlamlı
+                if (_isTurkishSelected.value) { // Zaten İngilizce değilse değiştir
+                    _isTurkishSelected.value = false
+                    clearText() // Dil değişince metni temizle
+                }
             }
         }
-
 
         fun clearText() {
             _recognizedText.value = ""
         }
-    }
+        fun saveCurrentText() {
+            val textToSave = recognizedText.value.trim()
+            if(textToSave.isNotEmpty()){
+                if(!_savedTexts.contains(textToSave)){
+                    _savedTexts.add(0,textToSave)
+                    Log.d("ViewModel", "Text saved: '$textToSave'. Total saved: ${_savedTexts.size}")
 
+                } else {
+                    Log.d("ViewModel", "Text '$textToSave' already exists in saved list.")
+                }
+            }
+
+        }
+        fun deleteSavedText(textToDelete: String) {
+            val removed = _savedTexts.remove(textToDelete)
+            if (removed) {
+                Log.d("ViewModel", "Text deleted: '$textToDelete'. Remaining: ${_savedTexts.size}")
+            } else {
+                Log.d("ViewModel", "Attempted to delete text not found: '$textToDelete'")
+            }
+        }
+    }
+    // --- Bitiş: ViewModel Tanımı ---
+
+
+    // --- Composable UI Tanımı ---
     @Composable
-    fun SpeechToTextApp(viewModel: MainViewModel) {
+    fun SpeechToTextApp(viewModel: MainViewModel,navController: NavController, activity: MainActivity) {
         val recognizedText by viewModel.recognizedText
         val isVoskSelected by viewModel.isVoskSelected
+        val isTurkishSelected by viewModel.isTurkishSelected // Vosk dilini buradan alacağız
         val activity = LocalContext.current as MainActivity
-
-        val isTurkishSelected by viewModel.isTurkishSelected
-        val isTurkishActive by viewModel.isTurkishActive  // Buton aktiflik durumları
-        val isEnglishActive by viewModel.isEnglishActive // Buton aktiflik durumları
 
         MaterialTheme {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
+                // Tanınan metin alanı
                 Text(
-                    text = recognizedText,
+                    text = recognizedText.ifBlank { "Dinlemeye başlamak için 'Konuşmayı Başlat' düğmesine basın." },
                     modifier = Modifier
-                        .weight(1f)
+                        .weight(1f) // Alanın çoğunu kaplaması için
+                        .fillMaxWidth()
                         .verticalScroll(rememberScrollState())
                         .padding(bottom = 16.dp)
                 )
 
-                Button(
-                    onClick = {
-                        if (isVoskSelected) {
-                            activity.startVoskListening(viewModel::setRecognizedText)
-                        } else {
-                            activity.startGoogleListening(viewModel::setRecognizedText)
-                        }
-                    },
-                    modifier = Modifier.padding(bottom = 8.dp)
-                ) {
-                    Text("Konuşmayı Başlat")
-                }
+                Spacer(modifier = Modifier.height(8.dp)) // Metin ile butonlar arasına boşluk
 
-                Button(onClick = { viewModel.toggleVoskSelection() }) {
-                    Text(if (isVoskSelected) "Vosk Kullanılıyor" else "Google Kullanılıyor")
-                }
-                Row(modifier = Modifier.padding(bottom = 8.dp)) {
+                // --- Kontrol Butonları ---
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+
+                    // Konuşmayı Başlat Butonu
                     Button(
                         onClick = {
-                            viewModel.setTurkish()
-                            activity.initModel() // Dili değiştirdikten sonra modeli yeniden yükle
+                            if (isVoskSelected) {
+                                activity.releaseGoogleRecognizer() // Google açıksa kapat (önlem)
+                                activity.startVoskListening(viewModel::setRecognizedText)
+                            } else {
+                                activity.releaseVoskResources() // Vosk açıksa kapat (önlem)
+                                activity.startGoogleListening(viewModel::setRecognizedText)
+                            }
                         },
-                        enabled = isVoskSelected  // Buton, sadece Vosk seçiliyken aktif
-
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp)
                     ) {
-                        Text("Türkçe", color = if (isTurkishActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)                    }
-                    Spacer(modifier = Modifier.width(8.dp))
+                        Text("Konuşmayı Başlat")
+                    }
 
-                    Button(onClick = {
-                        viewModel.setEnglish()
-                        activity.initModel()  // Dili değiştirdikten sonra modeli yeniden yükle
-
-                    },
-                        enabled = isVoskSelected // Buton, sadece Vosk seçiliyken aktif
-
+                    // Vosk/Google Değiştirme Butonu
+                    Button(
+                        onClick = {
+                            activity.releaseAllRecognizers() // Önce temizle
+                            viewModel.toggleVoskSelection() // Sonra state'i değiştir
+                            // Yeni seçime göre modeli hazırla (sadece Vosk ise)
+                            if (viewModel.isVoskSelected.value) {
+                                activity.initModel()
+                            }
+                            // clearText() viewModel içinde zaten çağrılıyor
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp)
                     ) {
-                        Text("English", color = if (isEnglishActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)                    }
-                }
-                Button(onClick = { viewModel.clearText() }) {
-                    Text("Temizle")
+                        Text(if (isVoskSelected) "Geçiş Yap: Google Kullan" else "Geçiş Yap: Vosk Kullan")
+                    }
+
+                    // Dil ve Temizle Butonları için Ortak Satır
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween // Butonları iki uca yasla
+                    ) {
+                        // Dil Değiştirme Butonu (Sadece Vosk seçiliyken aktif ve görünür)
+                        Button(
+                            onClick = {
+                                // Mevcut dilin tersini ayarla
+                                if (isTurkishSelected) {
+                                    Log.d("UIAction", "Switching Vosk to English from Button")
+                                    viewModel.setEnglish()
+                                } else {
+                                    Log.d("UIAction", "Switching Vosk to Turkish from Button")
+                                    viewModel.setTurkish()
+                                }
+                                // Modeli yeniden yükle
+                                activity.initModel()
+                                // clearText() viewModel içinde zaten çağrılıyor
+                            },
+                            enabled = isVoskSelected // Sadece Vosk seçiliyken etkin
+                            // modifier = Modifier.weight(1f) // Eşit genişlik istersen
+                        ) {
+                            // Seçili dile göre metni göster (Vosk seçili değilse de pasif görünür)
+                            Text(
+                                if (isVoskSelected) {
+                                    if (isTurkishSelected) "Dil: Türkçe" else "Dil: English"
+                                } else {
+                                    "Dil (Vosk)" // Vosk seçili değilken gösterilecek metin
+                                }
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                viewModel.saveCurrentText()
+                                navController.navigate("history")
+                                      }, // Düzeltilmiş fonksiyon adı
+                            enabled = recognizedText.isNotBlank() // Metin boş değilse aktif
+                        ) {
+                            Text("Kaydet")
+                        }
+
+                        // Spacer(modifier = Modifier.width(8.dp)) // SpaceBetween kullandığımız için gereksiz
+
+                        // Temizle Butonu (Her zaman görünür ve aktif)
+                        Button(
+                            onClick = { viewModel.clearText() }
+                            // modifier = Modifier.weight(1f) // Eşit genişlik istersen
+                        ) {
+                            Text("Temizle")
+                        }
+                    }
                 }
             }
         }
     }
+    // --- Bitiş: Composable UI Tanımı ---
 
 
+    // --- Vosk Dinleme Fonksiyonları ---
     private fun startVoskListening(onResult: (String) -> Unit) {
-        if (model == null) {
-            Toast.makeText(this, "Vosk modeli yüklenemedi", Toast.LENGTH_SHORT).show()
-            return
+        // Modelin ve servisin hazır olduğundan emin ol
+        if (model == null || voskRecognizer == null || speechService == null) {
+            Log.w("VoskListen", "Vosk components not ready. Attempting to initialize...")
+            initModel() // Tekrar başlatmayı dene
+            // Tekrar kontrol et
+            if (model == null || voskRecognizer == null || speechService == null) {
+                Toast.makeText(this, "Vosk başlatılamadı. Model yüklenemedi.", Toast.LENGTH_SHORT).show()
+                Log.e("VoskListen", "Cannot start listening. Vosk components still null after re-init.")
+                return
+            }
+            Log.d("VoskListen", "Vosk components initialized successfully on second attempt.")
         }
 
         try {
-            speechService?.stop() // Önce durdur
-            speechService = null // Sıfırla, yeni bir tane oluştur.
-            val rec = Recognizer(model, 16000.0f)
-            speechService = SpeechService(rec, 16000.0f)
-            speechService?.startListening(object :
-                org.vosk.android.RecognitionListener { // Doğru import ve kullanım
-                override fun onPartialResult(partialResult: String) {
-                    processVoskResult(partialResult, isFinal = false, onResult)
+            // SpeechService'i her seferinde yeniden oluşturmak yerine mevcut olanı kullanmayı deneyelim.
+            // Eğer sorun devam ederse eski yönteme (stop/null/new) dönülebilir.
+            Log.d("VoskListen", "Starting Vosk listening...")
+            // Önceki dinlemeyi durdurduğundan emin ol (ihtiyati)
+            speechService?.stop()
+
+            speechService?.startListening(object : org.vosk.android.RecognitionListener {
+                override fun onPartialResult(hypothesis: String) {
+                    processVoskResult(hypothesis, isFinal = false, onResult)
                 }
 
-                override fun onResult(result: String) {
-                    processVoskResult(result, isFinal = true, onResult)
-                    stopListening()  // Vosk'u durdur
-                    startListening() // ve tekrar başlat (sürekli dinleme için)
+                override fun onResult(hypothesis: String) {
+                    processVoskResult(hypothesis, isFinal = true, onResult)
+                    Log.d("VoskListen", "Vosk onResult received. Listening implicitly stops or waits for next utterance.")
+                    // Otomatik yeniden başlatma yok. Kullanıcı tekrar basmalı.
                 }
 
-                override fun onFinalResult(hypothesis: String?) {
-                    Log.d("Vosk", "onFinalResult: $hypothesis")                }
+                override fun onFinalResult(hypothesis: String) {
+                    // Genellikle onResult yeterlidir, ama bu da işlenebilir.
+                    Log.d("VoskListen", "Vosk onFinalResult: $hypothesis")
+                    processVoskResult(hypothesis, isFinal = true, onResult)
+                }
 
                 override fun onError(error: Exception) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Vosk Hatası: ${error.message}",
-                        Toast.LENGTH_LONG
-                    ).show()
+                    Log.e("VoskListen", "Vosk Error", error)
+                    updateText("Vosk Hatası: ${error.message}")
                 }
 
                 override fun onTimeout() {
-                    Toast.makeText(this@MainActivity, "Vosk Zaman Aşımı", Toast.LENGTH_SHORT)
-                        .show()
+                    Log.w("VoskListen", "Vosk Timeout")
+                    updateText("Vosk Zaman Aşımı")
                 }
             })
+            updateText("Vosk dinliyor...") // UI'da dinlediğini belirt
+            Log.d("VoskListen", "Vosk startListening called.")
+
         } catch (e: IOException) {
-            Toast.makeText(
-                this,
-                "Vosk başlatılırken hata oluştu: ${e.message}",
-                Toast.LENGTH_SHORT
-            ).show()
+            Log.e("VoskListen", "IOException during startListening", e)
+            Toast.makeText(this, "Vosk dinleme başlatılamadı: ${e.message}", Toast.LENGTH_SHORT).show()
+            releaseVoskResources() // Sorun varsa temizle
+        } catch (e: IllegalStateException) {
+            Log.e("VoskListen", "IllegalStateException during startListening", e)
+            Toast.makeText(this, "Vosk durumu hatası: ${e.message}", Toast.LENGTH_SHORT).show()
+            releaseVoskResources() // Sorun varsa temizle
         }
     }
-    private fun processVoskResult(jsonResult: String, isFinal: Boolean, onResult: (String) -> Unit) {
-        val result = try {
-            if(isFinal) {
-                org.json.JSONObject(jsonResult).getString("text")
+
+    private fun processVoskResult(jsonResult: String?, isFinal: Boolean, onResult: (String) -> Unit) {
+        if (jsonResult.isNullOrBlank()) return // Boş veya null sonucu işleme
+
+        try {
+            val jsonObject = org.json.JSONObject(jsonResult)
+            val text = when {
+                // Önce 'text' alanını kontrol et (genellikle final sonuç)
+                jsonObject.has("text") && jsonObject.getString("text").isNotBlank() -> jsonObject.getString("text")
+                // Sonra 'partial' alanını kontrol et
+                jsonObject.has("partial") && jsonObject.getString("partial").isNotBlank() -> jsonObject.getString("partial")
+                else -> null
             }
-            else{
-                org.json.JSONObject(jsonResult).getString("partial")
+
+            text?.let {
+                // Log.d("VoskProcess", "Processed Text ($isFinal): $it")
+                updateText(it) // UI'ı güncelle
             }
+        } catch (e: org.json.JSONException) {
+            Log.e("VoskProcess", "Failed to parse Vosk JSON result: $jsonResult", e)
         } catch (e: Exception) {
-            ""
+            Log.e("VoskProcess", "Error processing Vosk result", e)
         }
-        if(result.isNotBlank()){
-            onResult(result)
-        }
-
     }
+    // --- Bitiş: Vosk Dinleme Fonksiyonları ---
 
 
+    // --- Google Dinleme Fonksiyonları ---
     private fun startGoogleListening(onResult: (String) -> Unit) {
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
-            if (speechRecognizer == null) {
-                speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-                setupGoogleSpeechRecognizer(onResult)
-            }
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-            intent.putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-            intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Bir şeyler söyleyin...")
-            intent.putExtra(
-                RecognizerIntent.EXTRA_PARTIAL_RESULTS,
-                true
-            ) //Kısmi sonuçları almak için
-
-            speechRecognizer?.startListening(intent)
-        } else {
+        // İzin kontrolü
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(this, "Mikrofon izni verilmedi", Toast.LENGTH_SHORT).show()
+            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) // Tekrar iste
+            return
         }
 
-    }
+        // Vosk çalışıyorsa durdur (önlem)
+        releaseVoskResources()
 
+        try {
+            if (googleSpeechRecognizer == null) {
+                Log.d("GoogleListen", "Creating Google SpeechRecognizer...")
+                googleSpeechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
+                setupGoogleSpeechRecognizer(onResult)
+                Log.d("GoogleListen", "Google SpeechRecognizer created and listener set.")
+            } else {
+                Log.d("GoogleListen", "Google SpeechRecognizer already exists. Stopping previous listening.")
+                googleSpeechRecognizer?.stopListening() // Önceki dinlemeyi durdur
+                googleSpeechRecognizer?.cancel()      // İptal et
+            }
+
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                // Google dili için cihaz varsayılanını kullan
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toString())
+                // Alternatif: putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, Locale.getDefault().toString())
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Google dinliyor...")
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true) // Kısmi sonuçları al
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            }
+
+            Log.d("GoogleListen", "Starting Google listening with intent language: ${intent.getStringExtra(RecognizerIntent.EXTRA_LANGUAGE)}")
+            googleSpeechRecognizer?.startListening(intent)
+            updateText("Google başlatılıyor...") // UI'da belirt
+
+        } catch (e: Exception) {
+            Log.e("GoogleListen", "Error starting Google listening", e)
+            Toast.makeText(this, "Google dinleme başlatılamadı: ${e.message}", Toast.LENGTH_SHORT).show()
+            releaseGoogleRecognizer() // Hata olursa temizle
+        }
+    }
 
     private fun setupGoogleSpeechRecognizer(onResult: (String) -> Unit) {
-        speechRecognizer?.setRecognitionListener(object :
-            GoogleRecognitionListener {  // Burada çakışmayı çöz
+        googleSpeechRecognizer?.setRecognitionListener(object : GoogleRecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
-                Toast.makeText(
-                    this@MainActivity,
-                    "Dinlemeye hazır!",
-                    Toast.LENGTH_SHORT
-                ).show()
+                Log.d("GoogleCallback", "onReadyForSpeech")
+                updateText("Google dinliyor...")
             }
 
             override fun onBeginningOfSpeech() {
-                onResult("Dinleniyor...")
+                Log.d("GoogleCallback", "onBeginningOfSpeech")
             }
 
             override fun onRmsChanged(rmsdB: Float) {}
-
             override fun onBufferReceived(buffer: ByteArray) {}
 
             override fun onEndOfSpeech() {
-                onResult("Dinleniyor... (Bitti)") // veya boş bırakabilirsiniz
+                Log.d("GoogleCallback", "onEndOfSpeech")
+                updateText("Google işliyor...") // Bittiğini belirt
             }
 
             override fun onError(error: Int) {
                 val errorMessage = getErrorText(error)
-                Toast.makeText(
-                    this@MainActivity,
-                    "Hata: $errorMessage",
-                    Toast.LENGTH_LONG
-                ).show()
-                Log.e("SpeechRecognizer", "Error: $errorMessage")
+                Log.e("GoogleCallback", "onError: $error - $errorMessage")
+                updateText("Google Hatası: $errorMessage")
+                // Bazı hatalar (örn: ERROR_CLIENT, ERROR_NETWORK) sonrası yeniden denemek gerekebilir.
+                // ERROR_NO_MATCH ve ERROR_SPEECH_TIMEOUT sonrası genellikle tekrar başlatılır.
+                // Hata sonrası dinlemeyi tekrar başlatmayı deneyebiliriz:
+                // android.os.Handler(Looper.getMainLooper()).postDelayed({
+                //     if (!viewModel.isVoskSelected.value) { // Hala Google modundaysak
+                //         startGoogleListening(onResult)
+                //     }
+                // }, 500) // Yarım saniye bekle
             }
 
             override fun onResults(results: Bundle?) {
                 val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!matches.isNullOrEmpty()) {
-                    onResult(matches[0])
+                    val text = matches[0]
+                    Log.d("GoogleCallback", "onResults: $text")
+                    updateText(text)
+                } else {
+                    Log.d("GoogleCallback", "onResults: No matches found")
+                    // updateText("Sonuç bulunamadı.") // Opsiyonel: Kullanıcıya bilgi ver
                 }
+                // Google genellikle onResults sonrası durur. Sürekli dinleme için:
+                // if (!viewModel.isVoskSelected.value) { // Hala Google modundaysak
+                //    startGoogleListening(onResult)
+                // }
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
-                val matches =
-                    partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!matches.isNullOrEmpty()) {
-                    onResult(matches[0])
+                    val partialText = matches[0]
+                    // Log.d("GoogleCallback", "onPartialResults: $partialText") // Çok sık log basabilir
+                    updateText(partialText)
                 }
             }
 
-            override fun onEvent(p0: Int, p1: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {
+                Log.d("GoogleCallback", "onEvent: $eventType")
+            }
         })
     }
-
 
     private fun getErrorText(errorCode: Int): String {
         return when (errorCode) {
             SpeechRecognizer.ERROR_AUDIO -> "Ses kaydı hatası"
-            SpeechRecognizer.ERROR_CLIENT -> "İstemci tarafı hatası"
+            SpeechRecognizer.ERROR_CLIENT -> "İstemci tarafı hatası (İnternet?)"
             SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Yetersiz izinler"
             SpeechRecognizer.ERROR_NETWORK -> "Ağ hatası"
             SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Ağ zaman aşımı"
-            SpeechRecognizer.ERROR_NO_MATCH -> "Eşleşme bulunamadı"
+            SpeechRecognizer.ERROR_NO_MATCH -> "Anlaşılamadı"
             SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Tanıyıcı meşgul"
             SpeechRecognizer.ERROR_SERVER -> "Sunucu hatası"
-            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Konuşma zaman aşımı"
-            else -> "Bilinmeyen hata"
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Konuşma algılanmadı"
+            SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "Dil desteklenmiyor/mevcut değil"
+            SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "Dil desteklenmiyor"
+            14 -> "Ses yok veya çok kısa" // ERROR_TOO_SHORT gibi resmi olmayan bir kod olabilir
+            else -> "Bilinmeyen Google hatası ($errorCode)"
         }
     }
+    // --- Bitiş: Google Dinleme Fonksiyonları ---
 
-    private fun stopListening(){ //Vosk için durdurma metodu
-        speechService?.stop()
-    }
-    private fun startListening(){ //Vosk için başlatma metodu.
-        speechService?.startListening(object : org.vosk.android.RecognitionListener { // Doğru import ve kullanım
-            override fun onPartialResult(partialResult: String) {
-                processVoskResult(partialResult, isFinal = false, ::updateText)
-            }
 
-            override fun onResult(result: String) {
-                processVoskResult(result, isFinal = true, ::updateText)
-                stopListening()  // Vosk'u durdur
-                startListening() // ve tekrar başlat (sürekli dinleme için)
-            }
-
-            override fun onFinalResult(hypothesis: String?) {
-                Log.d("Vosk", "onFinalResult: $hypothesis")
-            }
-
-            override fun onError(error: Exception) {
-                Toast.makeText(this@MainActivity, "Vosk Hatası: ${error.message}", Toast.LENGTH_LONG)
-                    .show()
-            }
-
-            override fun onTimeout() {
-                Toast.makeText(this@MainActivity, "Vosk Zaman Aşımı", Toast.LENGTH_SHORT).show()
-            }
-        })
-    }
-    private  fun updateText(text: String){ //Yardımcı bir method
-        runOnUiThread{
-            //val viewModel: MainViewModel = viewModel()
+    // --- Yardımcı Fonksiyonlar ---
+    private fun updateText(text: String) {
+        // UI güncellemeleri her zaman Main Thread'de yapılmalı
+        runOnUiThread {
             viewModel.setRecognizedText(text)
         }
     }
+    // --- Bitiş: Yardımcı Fonksiyonlar ---
 
 
+    // --- Preview ---
     @Preview(showBackground = true)
     @Composable
     fun DefaultPreview() {
-        MaterialTheme { // Use default MaterialTheme
-            SpeechToTextApp(viewModel = MainViewModel())
+        // Preview için geçici bir ViewModel örneği oluştur
+        val previewViewModel = MainViewModel()
+        val previewNavController = rememberNavController()
+        MaterialTheme {
+            SpeechToTextApp(viewModel = previewViewModel, navController = previewNavController, activity = LocalContext.current as MainActivity)
         }
     }
-    }
+    // --- Bitiş: Preview ---
+} // MainActivity Sonu
