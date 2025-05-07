@@ -17,14 +17,16 @@ import androidx.navigation.NavController
 import androidx.compose.foundation.layout.Row
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-
+// import androidx.compose.runtime.collectAsState // Kullanılmıyor, viewModel.savedTexts doğrudan kullanılıyor
+// import androidx.compose.runtime.getValue // State delegate için kullanılıyor, burada doğrudan liste alınıyor
 
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class) // TopAppBar için gerekli olabilir
 @Composable
 fun HistoryScreen(navController: NavController, viewModel: MainActivity.MainViewModel) {
+    // viewModel.savedTexts listesi, MainActivity.MainViewModel içinde
+    // SharedPreferences'dan yükleniyor ve değişiklikler oraya kaydediliyor.
+    // Bu nedenle HistoryScreen'in kendisinde SharedPreferences ile ilgili ek bir işlem yapmasına gerek yoktur.
     val savedTexts = viewModel.savedTexts // ViewModel'den listeyi al
 
     Scaffold(
@@ -68,23 +70,24 @@ fun HistoryScreen(navController: NavController, viewModel: MainActivity.MainView
             ) {
                 items(
                     items = savedTexts,
-                    key = {text -> text}) { text ->
-
+                    key = {text -> text} // Her öğe için benzersiz bir anahtar (metnin kendisi)
+                ) { text ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .animateItemPlacement()
-                            .padding(horizontal = 16.dp, vertical = 8.dp), // Satır içi boşluklar
+                            .animateItemPlacement() // Silme animasyonu için
+                            .padding(vertical = 8.dp), // Satır içi dikey boşluklar (yatay padding LazyColumn'dan geliyor)
                         verticalAlignment = Alignment.CenterVertically // Dikeyde ortala
                     ) {
                         Text(
                             text = text,
-                            modifier = Modifier.weight(1f), // Öğeler arası dikey boşluk
+                            modifier = Modifier.weight(1f), // Metnin kalan alanı kaplaması için
                             style = MaterialTheme.typography.bodyLarge // Metin stili
                         )
                         IconButton(
                             onClick = {
-                                // ViewModel'deki silme fonksiyonunu çağır
+                                // ViewModel'deki silme fonksiyonunu çağır.
+                                // Bu fonksiyon ViewModel içinde SharedPreferences'ı da günceller.
                                 viewModel.deleteSavedText(text)
                             }
                         ) {
@@ -95,9 +98,9 @@ fun HistoryScreen(navController: NavController, viewModel: MainActivity.MainView
                             )
                         }
                     }
-                        HorizontalDivider(thickness = 0.5.dp) // Öğeler arasına ince çizgi
-                    }
+                    HorizontalDivider(thickness = 0.5.dp) // Öğeler arasına ince çizgi
                 }
             }
         }
     }
+}

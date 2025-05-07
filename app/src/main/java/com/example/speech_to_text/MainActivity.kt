@@ -1,6 +1,8 @@
 package com.example.speech_to_text
 
 import android.Manifest
+import android.app.Application // ViewModel için eklendi
+import android.content.Context // SharedPreferences için eklendi
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -35,18 +37,20 @@ import java.util.Locale
 import android.speech.RecognitionListener as GoogleRecognitionListener // Alias
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.lifecycle.ViewModel // Doğru ViewModel importu
+import androidx.lifecycle.AndroidViewModel // ViewModel'den AndroidViewModel'e değiştirildi
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.util.zip.ZipInputStream
 import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateOf
+// import androidx.compose.runtime.mutableStateOf // Zaten yukarıda var
 import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import org.json.JSONArray // SharedPreferences için eklendi
+import org.json.JSONException // SharedPreferences için eklendi
 
 
 class MainActivity : ComponentActivity() {
@@ -279,7 +283,7 @@ class MainActivity : ComponentActivity() {
 
     // --- ViewModel Tanımı (MainActivity içinde) ---
     // Daha iyi pratik: Bu sınıfı ayrı bir Kotlin dosyasına taşımak.
-    class MainViewModel : ViewModel() {
+    class MainViewModel(application: Application) : AndroidViewModel(application) { // ViewModel'den AndroidViewModel'e değiştirildi ve application parametresi eklendi
         private val _recognizedText = mutableStateOf("")
         val recognizedText: State<String> = _recognizedText
 
@@ -289,8 +293,55 @@ class MainActivity : ComponentActivity() {
         private val _isTurkishSelected = mutableStateOf(true) // Vosk dili için
         val isTurkishSelected: State<Boolean> = _isTurkishSelected
 
-        private val _savedTexts = mutableListOf<String>()
-        val savedTexts = _savedTexts
+        // SharedPreferences için sabitler
+        companion object {
+            private const val PREFS_NAME = "SpeechAppPrefs"
+            private const val KEY_SAVED_TEXTS = "savedTextsKey"
+        }
+
+        private val sharedPreferences = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+        // _savedTexts'i SharedPreferences'dan yükleyerek başlat
+        private val _savedTexts = mutableStateListOf<String>()
+        val savedTexts: List<String> = _savedTexts // HistoryScreen'in gözlemleyeceği liste
+
+        init {
+            _savedTexts.addAll(loadTextsFromPrefs())
+        }
+
+
+        private fun saveTextsToPrefs() {
+            try {
+                val jsonArray = JSONArray()
+                _savedTexts.forEach { jsonArray.put(it) }
+                sharedPreferences.edit().putString(KEY_SAVED_TEXTS, jsonArray.toString()).apply()
+                Log.d("ViewModelPrefs", "Texts saved to SharedPreferences: $jsonArray")
+            } catch (e: JSONException) {
+                Log.e("ViewModelPrefs", "Error saving texts to SharedPreferences", e)
+            }
+        }
+
+        private fun loadTextsFromPrefs(): MutableList<String> {
+            val jsonString = sharedPreferences.getString(KEY_SAVED_TEXTS, null)
+            val texts = mutableListOf<String>()
+            if (jsonString != null) {
+                try {
+                    val jsonArray = JSONArray(jsonString)
+                    for (i in 0 until jsonArray.length()) {
+                        texts.add(jsonArray.getString(i))
+                    }
+                    Log.d("ViewModelPrefs", "Texts loaded from SharedPreferences: $texts")
+                } catch (e: JSONException) {
+                    Log.e("ViewModelPrefs", "Error parsing saved texts from SharedPreferences", e)
+                    // Hata durumunda boş liste döndürülür veya eski veriler silinebilir
+                    // sharedPreferences.edit().remove(KEY_SAVED_TEXTS).apply()
+                }
+            } else {
+                Log.d("ViewModelPrefs", "No saved texts found in SharedPreferences.")
+            }
+            return texts
+        }
+
 
         fun setRecognizedText(text: String) {
             _recognizedText.value = text
@@ -299,24 +350,23 @@ class MainActivity : ComponentActivity() {
         fun toggleVoskSelection() {
             val newSelection = !_isVoskSelected.value
             _isVoskSelected.value = newSelection
-            // State değişti, UI ve initModel/release çağrıları bunu yönetecek.
-            clearText() // Geçiş yapınca metni temizle
+            clearText()
         }
 
         fun setTurkish() {
-            if (_isVoskSelected.value) { // Sadece Vosk seçiliyken anlamlı
-                if (!_isTurkishSelected.value) { // Zaten Türkçe değilse değiştir
+            if (_isVoskSelected.value) {
+                if (!_isTurkishSelected.value) {
                     _isTurkishSelected.value = true
-                    clearText() // Dil değişince metni temizle
+                    clearText()
                 }
             }
         }
 
         fun setEnglish() {
-            if (_isVoskSelected.value) { // Sadece Vosk seçiliyken anlamlı
-                if (_isTurkishSelected.value) { // Zaten İngilizce değilse değiştir
+            if (_isVoskSelected.value) {
+                if (_isTurkishSelected.value) {
                     _isTurkishSelected.value = false
-                    clearText() // Dil değişince metni temizle
+                    clearText()
                 }
             }
         }
@@ -328,19 +378,20 @@ class MainActivity : ComponentActivity() {
             val textToSave = recognizedText.value.trim()
             if(textToSave.isNotEmpty()){
                 if(!_savedTexts.contains(textToSave)){
-                    _savedTexts.add(0,textToSave)
+                    _savedTexts.add(0,textToSave) // Başa ekle
                     Log.d("ViewModel", "Text saved: '$textToSave'. Total saved: ${_savedTexts.size}")
-
+                    saveTextsToPrefs() // SharedPreferences'a kaydet
                 } else {
                     Log.d("ViewModel", "Text '$textToSave' already exists in saved list.")
                 }
             }
-
         }
+
         fun deleteSavedText(textToDelete: String) {
             val removed = _savedTexts.remove(textToDelete)
             if (removed) {
                 Log.d("ViewModel", "Text deleted: '$textToDelete'. Remaining: ${_savedTexts.size}")
+                saveTextsToPrefs() // SharedPreferences'a kaydet
             } else {
                 Log.d("ViewModel", "Attempted to delete text not found: '$textToDelete'")
             }
@@ -355,7 +406,7 @@ class MainActivity : ComponentActivity() {
         val recognizedText by viewModel.recognizedText
         val isVoskSelected by viewModel.isVoskSelected
         val isTurkishSelected by viewModel.isTurkishSelected // Vosk dilini buradan alacağız
-        val activity = LocalContext.current as MainActivity
+        // val activity = LocalContext.current as MainActivity // Parametre olarak alındığı için gerek yok
 
         MaterialTheme {
             Column(
@@ -452,20 +503,23 @@ class MainActivity : ComponentActivity() {
 
                         Button(
                             onClick = {
-                                viewModel.saveCurrentText()
-                                navController.navigate("history")
-                                      }, // Düzeltilmiş fonksiyon adı
+                                viewModel.saveCurrentText() // Metni ViewModel üzerinden kaydet
+                                // SharedPreferences'a kaydetme viewModel içinde yapılacak
+                                if (viewModel.recognizedText.value.isNotBlank()) { // Sadece doluysa geçmiş ekranına git
+                                    navController.navigate("history")
+                                } else {
+                                    Toast.makeText(activity, "Kaydedilecek metin yok.", Toast.LENGTH_SHORT).show()
+                                }
+                            },
                             enabled = recognizedText.isNotBlank() // Metin boş değilse aktif
                         ) {
                             Text("Kaydet")
                         }
 
-                        // Spacer(modifier = Modifier.width(8.dp)) // SpaceBetween kullandığımız için gereksiz
 
                         // Temizle Butonu (Her zaman görünür ve aktif)
                         Button(
                             onClick = { viewModel.clearText() }
-                            // modifier = Modifier.weight(1f) // Eşit genişlik istersen
                         ) {
                             Text("Temizle")
                         }
@@ -493,10 +547,7 @@ class MainActivity : ComponentActivity() {
         }
 
         try {
-            // SpeechService'i her seferinde yeniden oluşturmak yerine mevcut olanı kullanmayı deneyelim.
-            // Eğer sorun devam ederse eski yönteme (stop/null/new) dönülebilir.
             Log.d("VoskListen", "Starting Vosk listening...")
-            // Önceki dinlemeyi durdurduğundan emin ol (ihtiyati)
             speechService?.stop()
 
             speechService?.startListening(object : org.vosk.android.RecognitionListener {
@@ -507,11 +558,9 @@ class MainActivity : ComponentActivity() {
                 override fun onResult(hypothesis: String) {
                     processVoskResult(hypothesis, isFinal = true, onResult)
                     Log.d("VoskListen", "Vosk onResult received. Listening implicitly stops or waits for next utterance.")
-                    // Otomatik yeniden başlatma yok. Kullanıcı tekrar basmalı.
                 }
 
                 override fun onFinalResult(hypothesis: String) {
-                    // Genellikle onResult yeterlidir, ama bu da işlenebilir.
                     Log.d("VoskListen", "Vosk onFinalResult: $hypothesis")
                     processVoskResult(hypothesis, isFinal = true, onResult)
                 }
@@ -541,21 +590,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun processVoskResult(jsonResult: String?, isFinal: Boolean, onResult: (String) -> Unit) {
-        if (jsonResult.isNullOrBlank()) return // Boş veya null sonucu işleme
+        if (jsonResult.isNullOrBlank()) return
 
         try {
             val jsonObject = org.json.JSONObject(jsonResult)
             val text = when {
-                // Önce 'text' alanını kontrol et (genellikle final sonuç)
                 jsonObject.has("text") && jsonObject.getString("text").isNotBlank() -> jsonObject.getString("text")
-                // Sonra 'partial' alanını kontrol et
                 jsonObject.has("partial") && jsonObject.getString("partial").isNotBlank() -> jsonObject.getString("partial")
                 else -> null
             }
 
             text?.let {
-                // Log.d("VoskProcess", "Processed Text ($isFinal): $it")
-                updateText(it) // UI'ı güncelle
+                updateText(it)
             }
         } catch (e: org.json.JSONException) {
             Log.e("VoskProcess", "Failed to parse Vosk JSON result: $jsonResult", e)
@@ -568,14 +614,12 @@ class MainActivity : ComponentActivity() {
 
     // --- Google Dinleme Fonksiyonları ---
     private fun startGoogleListening(onResult: (String) -> Unit) {
-        // İzin kontrolü
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             Toast.makeText(this, "Mikrofon izni verilmedi", Toast.LENGTH_SHORT).show()
-            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO) // Tekrar iste
+            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             return
         }
 
-        // Vosk çalışıyorsa durdur (önlem)
         releaseVoskResources()
 
         try {
@@ -586,28 +630,26 @@ class MainActivity : ComponentActivity() {
                 Log.d("GoogleListen", "Google SpeechRecognizer created and listener set.")
             } else {
                 Log.d("GoogleListen", "Google SpeechRecognizer already exists. Stopping previous listening.")
-                googleSpeechRecognizer?.stopListening() // Önceki dinlemeyi durdur
-                googleSpeechRecognizer?.cancel()      // İptal et
+                googleSpeechRecognizer?.stopListening()
+                googleSpeechRecognizer?.cancel()
             }
 
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                // Google dili için cihaz varsayılanını kullan
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toString())
-                // Alternatif: putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, Locale.getDefault().toString())
                 putExtra(RecognizerIntent.EXTRA_PROMPT, "Google dinliyor...")
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true) // Kısmi sonuçları al
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
             }
 
             Log.d("GoogleListen", "Starting Google listening with intent language: ${intent.getStringExtra(RecognizerIntent.EXTRA_LANGUAGE)}")
             googleSpeechRecognizer?.startListening(intent)
-            updateText("Google başlatılıyor...") // UI'da belirt
+            updateText("Google başlatılıyor...")
 
         } catch (e: Exception) {
             Log.e("GoogleListen", "Error starting Google listening", e)
             Toast.makeText(this, "Google dinleme başlatılamadı: ${e.message}", Toast.LENGTH_SHORT).show()
-            releaseGoogleRecognizer() // Hata olursa temizle
+            releaseGoogleRecognizer()
         }
     }
 
@@ -627,21 +669,13 @@ class MainActivity : ComponentActivity() {
 
             override fun onEndOfSpeech() {
                 Log.d("GoogleCallback", "onEndOfSpeech")
-                updateText("Google işliyor...") // Bittiğini belirt
+                updateText("Google işliyor...")
             }
 
             override fun onError(error: Int) {
                 val errorMessage = getErrorText(error)
                 Log.e("GoogleCallback", "onError: $error - $errorMessage")
                 updateText("Google Hatası: $errorMessage")
-                // Bazı hatalar (örn: ERROR_CLIENT, ERROR_NETWORK) sonrası yeniden denemek gerekebilir.
-                // ERROR_NO_MATCH ve ERROR_SPEECH_TIMEOUT sonrası genellikle tekrar başlatılır.
-                // Hata sonrası dinlemeyi tekrar başlatmayı deneyebiliriz:
-                // android.os.Handler(Looper.getMainLooper()).postDelayed({
-                //     if (!viewModel.isVoskSelected.value) { // Hala Google modundaysak
-                //         startGoogleListening(onResult)
-                //     }
-                // }, 500) // Yarım saniye bekle
             }
 
             override fun onResults(results: Bundle?) {
@@ -652,19 +686,13 @@ class MainActivity : ComponentActivity() {
                     updateText(text)
                 } else {
                     Log.d("GoogleCallback", "onResults: No matches found")
-                    // updateText("Sonuç bulunamadı.") // Opsiyonel: Kullanıcıya bilgi ver
                 }
-                // Google genellikle onResults sonrası durur. Sürekli dinleme için:
-                // if (!viewModel.isVoskSelected.value) { // Hala Google modundaysak
-                //    startGoogleListening(onResult)
-                // }
             }
 
             override fun onPartialResults(partialResults: Bundle?) {
                 val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 if (!matches.isNullOrEmpty()) {
                     val partialText = matches[0]
-                    // Log.d("GoogleCallback", "onPartialResults: $partialText") // Çok sık log basabilir
                     updateText(partialText)
                 }
             }
@@ -688,7 +716,7 @@ class MainActivity : ComponentActivity() {
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Konuşma algılanmadı"
             SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "Dil desteklenmiyor/mevcut değil"
             SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "Dil desteklenmiyor"
-            14 -> "Ses yok veya çok kısa" // ERROR_TOO_SHORT gibi resmi olmayan bir kod olabilir
+            14 -> "Ses yok veya çok kısa"
             else -> "Bilinmeyen Google hatası ($errorCode)"
         }
     }
@@ -697,7 +725,6 @@ class MainActivity : ComponentActivity() {
 
     // --- Yardımcı Fonksiyonlar ---
     private fun updateText(text: String) {
-        // UI güncellemeleri her zaman Main Thread'de yapılmalı
         runOnUiThread {
             viewModel.setRecognizedText(text)
         }
@@ -709,12 +736,11 @@ class MainActivity : ComponentActivity() {
     @Preview(showBackground = true)
     @Composable
     fun DefaultPreview() {
-        // Preview için geçici bir ViewModel örneği oluştur
-        val previewViewModel = MainViewModel()
+        val previewViewModel = MainViewModel(Application()) // Preview için Application mock'u
         val previewNavController = rememberNavController()
         MaterialTheme {
             SpeechToTextApp(viewModel = previewViewModel, navController = previewNavController, activity = LocalContext.current as MainActivity)
         }
     }
     // --- Bitiş: Preview ---
-} // MainActivity Sonu
+}
